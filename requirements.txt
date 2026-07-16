@@ -1,0 +1,3 @@
+python-telegram-bot==20.8
+apify-client==1.8.1
+flask==3.0.3
