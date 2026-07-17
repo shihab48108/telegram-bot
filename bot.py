@@ -15,7 +15,7 @@ from telegram.ext import (
 )
 
 # ==============================
-# RENDER SERVER SETUP (খুবই জরুরি)
+# RENDER SERVER SETUP
 # ==============================
 app_flask = Flask(__name__)
 
@@ -24,7 +24,6 @@ def home():
     return "Bot is live and running 24/7 on Render!"
 
 def run_flask():
-    # রেন্ডার তার নিজের মতো PORT সেট করে নেয়, না পেলে ডিফল্ট ৮০৮০ ব্যবহার করবে
     port = int(os.environ.get("PORT", 8080))
     app_flask.run(host='0.0.0.0', port=port)
 
@@ -35,16 +34,17 @@ BOT_TOKEN = "8640744131:AAE36iNhuGx_DO3J1datYRfls0oQoOzVWfE"
 APIFY_TOKEN = "apify_api_bGe2YIpSgTVy5IFwqsD3azTbCZ30sf17huGU"
 
 # ==============================
-# GLOBALS & FILES
+# GLOBALS & STORAGE (Render-Safe Path)
 # ==============================
 is_running = True        
 is_auto_enabled = True  
 last_manual_check_time = 0 
 last_ran_minute = -1  
 
-USERNAMES_FILE = "usernames.json"
-LAST_POSTS_FILE = "last_posts.json"
-CHAT_ID_FILE = "chat_id.txt"
+# রেন্ডারের অস্থায়ী ডিরেক্টরিতে ফাইল পাথ সেট করা যাতে ফাইল রাইটিং এরর না আসে
+USERNAMES_FILE = "/tmp/usernames.json"
+LAST_POSTS_FILE = "/tmp/last_posts.json"
+CHAT_ID_FILE = "/tmp/chat_id.txt"
 
 apify_client = ApifyClient(APIFY_TOKEN)
 
@@ -61,8 +61,11 @@ def load_usernames():
     return set()
 
 def save_usernames():
-    with open(USERNAMES_FILE, "w", encoding="utf-8") as file:
-        json.dump(list(usernames), file, indent=2)
+    try:
+        with open(USERNAMES_FILE, "w", encoding="utf-8") as file:
+            json.dump(list(usernames), file, indent=2)
+    except Exception as e:
+        print(f"Error saving usernames: {e}")
 
 def load_last_posts():
     if os.path.exists(LAST_POSTS_FILE):
@@ -74,12 +77,18 @@ def load_last_posts():
     return {}
 
 def save_last_posts():
-    with open(LAST_POSTS_FILE, "w", encoding="utf-8") as file:
-        json.dump(last_posts, file, indent=2)
+    try:
+        with open(LAST_POSTS_FILE, "w", encoding="utf-8") as file:
+            json.dump(last_posts, file, indent=2)
+    except Exception as e:
+        print(f"Error saving posts: {e}")
 
-def save_chat_id(chat_id):
-    with open(CHAT_ID_FILE, "w", encoding="utf-8") as file:
-        file.write(str(chat_id))
+def save_chat_id(chat_id_val):
+    try:
+        with open(CHAT_ID_FILE, "w", encoding="utf-8") as file:
+            file.write(str(chat_id_val))
+    except Exception as e:
+        print(f"Error saving chat id: {e}")
 
 def load_chat_id():
     if os.path.exists(CHAT_ID_FILE):
@@ -105,14 +114,22 @@ def get_latest_post(username):
         items = list(apify_client.dataset(dataset_id).iterate_items())
         if not items: return None
         post = items[0]
-        return {"url": post.get("url"), "type": post.get("type", "Post"), "username": post.get("ownerUsername", username)}
-    except Exception:
+        return {"url": post.get("url"), "type": post.get("type", "Post")}
+    except Exception as e:
+        print(f"Apify Fetch Error for {username}: {e}")
         return None
 
-async def process_single_username(username, context, chat_id, manual):
+async def process_single_username(username, context, chat_id):
+    global last_posts
     try:
+        # রিফ্রেশড ডেটা লোড
+        last_posts = load_last_posts()
         latest = await asyncio.to_thread(get_latest_post, username)
-        if not latest: return
+        
+        if not latest:
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ @{username}: কোনো ডেটা পাওয়া যায়নি।")
+            return
+            
         post_url = latest["url"]
         post_type = latest["type"]
         old_url = last_posts.get(username)
@@ -129,6 +146,7 @@ async def process_single_username(username, context, chat_id, manual):
             await context.bot.send_message(chat_id=chat_id, text=f"🚨 NEW POST!\n👤 @{username}\n📱 {post_type}\n🔗 {post_url}")
         else:
             await context.bot.send_message(chat_id=chat_id, text=f"✅ @{username}: নতুন পোস্ট নেই।")
+            
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"❌ @{username} Error: `{e}`")
 
@@ -137,17 +155,17 @@ async def process_single_username(username, context, chat_id, manual):
 # ==============================
 async def check_accounts(context: ContextTypes.DEFAULT_TYPE, manual=False):
     chat_id = load_chat_id()
-    if not chat_id or not usernames: return
+    current_users = load_usernames()
+    if not chat_id or not current_users: return
 
     round_type = "Manual" if manual else "Automatic"
-    await context.bot.send_message(chat_id=chat_id, text=f"🔄 [{round_type}] {len(usernames)} টি অ্যাকাউন্ট স্ক্যান হচ্ছে...")
+    await context.bot.send_message(chat_id=chat_id, text=f"🔄 [{round_type}] {len(current_users)} টি অ্যাকাউন্ট স্ক্যান হচ্ছে...")
 
-    semaphore = asyncio.Semaphore(20) 
-    async def worker(username):
-        async with semaphore:
-            await process_single_username(username, context, chat_id, manual)
+    # লুপ জ্যাম এড়াতে ক্রমান্বয়ে একটির পর একটি অ্যাকাউন্ট নিখুঁতভাবে স্ক্যান হবে
+    for u in sorted(list(current_users)):
+        await process_single_username(u, context, chat_id)
+        await asyncio.sleep(1) # টেলিগ্রাম রেট লিমিট এড়াতে ১ সেকেন্ড বিরতি
 
-    await asyncio.gather(*[worker(u) for u in sorted(list(usernames))])
     await context.bot.send_message(chat_id=chat_id, text="🏁 রাউন্ড সম্পূর্ণ শেষ হয়েছে!")
 
 # ==============================
@@ -163,7 +181,6 @@ async def clock_scheduler(context: ContextTypes.DEFAULT_TYPE):
                 await check_accounts(context, manual=False)
                 last_ran_minute = now.minute
             else:
-                print("Skipping Auto Check: Manual check happened < 5 mins ago.")
                 chat_id = load_chat_id()
                 if chat_id:
                     await context.bot.send_message(
@@ -176,8 +193,8 @@ async def clock_scheduler(context: ContextTypes.DEFAULT_TYPE):
 # COMMANDS
 # ==============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    save_chat_id(chat_id)
+    chat_id_val = update.effective_chat.id
+    save_chat_id(chat_id_val)
     await update.message.reply_text(
         "✅ Instagram Monitor Bot is running!\n\n"
         "Main Commands:\n/on | /off\n/check\n\n"
@@ -193,30 +210,29 @@ async def toggle_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def toggle_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_running
     is_running = False
-    await update.message.reply_text("🛑 Bot monitoring is now OFF. (সব ধরনের চেকিং বন্ধ)")
+    await update.message.reply_text("🛑 Bot monitoring is now OFF.")
 
 async def toggle_auto_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_auto_enabled
     is_auto_enabled = True
-    await update.message.reply_text("🔄 Auto Check is now Enabled. ঘড়ি ধরে প্রতি ১০ মিনিট পর পর অটো চেক হবে।")
+    await update.message.reply_text("🔄 Auto Check is now Enabled.")
 
 async def toggle_auto_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_auto_enabled
     is_auto_enabled = False
-    await update.message.reply_text("🛑 Auto Check is now Disabled. অটোমেটিক চেকিং বন্ধ করা হয়েছে।")
+    await update.message.reply_text("🛑 Auto Check is now Disabled.")
 
 async def add_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
-    if not context.args: 
-        return await update.message.reply_text("❌ Example: /add cristiano leomessi neymarjr")
-    
     global usernames
-    usernames = load_usernames()
+    chat_id_val = update.effective_chat.id
+    save_chat_id(chat_id_val)
+    if not context.args: 
+        return await update.message.reply_text("❌ Example: /add cristiano leomessi")
     
+    usernames = load_usernames()
     added_users = []
     already_monitored = []
     
-    # একাধিক ইউজারনেম স্পেস বা কমা দিয়ে আলাদা করার প্রসেস
     for arg in context.args:
         cleaned_args = arg.replace("@", "").replace(",", " ").split()
         for u_name in cleaned_args:
@@ -233,25 +249,37 @@ async def add_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if added_users:
         save_usernames()
         await update.message.reply_text(f"✅ successfully added:\n" + "\n".join(added_users))
+        
+        # ইউজার অ্যাড হওয়ার সাথে সাথে ব্যাকগ্রাউন্ডে তাদের প্রথম কানেকশনটা রান করবে
+        for user in added_users:
+            pure_name = user.replace("@", "")
+            asyncio.create_task(process_single_username(pure_name, context, chat_id_val))
     
     if already_monitored:
         await update.message.reply_text(f"⚠️ Already in list:\n" + "\n".join(already_monitored))
 
 async def remove_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global usernames, last_posts
     if not context.args: return await update.message.reply_text("❌ Example: /remove cristiano")
     
     username = context.args[0].replace("@", "").strip().lower()
+    usernames = load_usernames()
+    last_posts = load_last_posts()
+    
     if username in usernames:
         usernames.remove(username)
         save_usernames()
-        if username in last_posts: del last_posts[username]; save_last_posts()
+        if username in last_posts: 
+            del last_posts[username]
+            save_last_posts()
         await update.message.reply_text(f"🗑 @{username} removed!")
     else:
         await update.message.reply_text(f"❌ @{username} not found.")
 
 async def list_usernames(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not usernames: return await update.message.reply_text("📭 No accounts added.")
-    text = "📋 Monitoring Accounts:\n\n" + "\n".join([f"• @{u}" for u in sorted(usernames)])
+    current_users = load_usernames()
+    if not current_users: return await update.message.reply_text("📭 No accounts added.")
+    text = "📋 Monitoring Accounts:\n\n" + "\n".join([f"• @{u}" for u in sorted(current_users)])
     await update.message.reply_text(text)
 
 async def manual_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -269,9 +297,7 @@ async def manual_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # ==============================
 def main():
-    # 🚀 বটের মেইন ফাংশন চালু হওয়ার আগেই Flask ওয়েব সার্ভারটিকে ব্যাকগ্রাউন্ড থ্রেডে স্টার্ট করা হলো
     Thread(target=run_flask, daemon=True).start()
-
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
