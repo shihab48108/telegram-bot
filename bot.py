@@ -84,22 +84,36 @@ async def check_cmd(u, c):
     last_manual_check_time = time.time()
     await check_accounts(c, manual=True)
 
-async def auto_scheduler(c):
+# Async Background Scheduler (Alternative to JobQueue)
+async def start_async_scheduler(application):
     global last_ran_minute
-    if not is_running or not is_auto_enabled or not chat_id: return
-    
-    # 5 min logic
-    if time.time() - last_manual_check_time < 300: return
-    
-    if datetime.now().minute % 10 == 0 and datetime.now().minute != last_ran_minute:
-        last_ran_minute = datetime.now().minute
-        await c.bot.send_message(chat_id=chat_id, text="🔄 [Automatic] Auto check started...")
-        await check_accounts(c, manual=False)
-        await c.bot.send_message(chat_id=chat_id, text="🏁 [Automatic] Auto check complete!")
+    while True:
+        try:
+            await asyncio.sleep(30) # প্রতি ৩০ সেকেন্ড পর পর কন্ডিশন চেক করবে
+            if not is_running or not is_auto_enabled or not chat_id: 
+                continue
+            
+            # ৫ মিনিটের মধ্যে ম্যানুয়াল চেক হয়ে থাকলে অটো স্কিপ করবে
+            if time.time() - last_manual_check_time < 300:
+                now = datetime.now()
+                if now.minute % 10 == 0 and now.minute != last_ran_minute:
+                    last_ran_minute = now.minute
+                    await application.bot.send_message(chat_id=chat_id, text="⏩ Manual check occurred recently, skipping this auto-check.")
+                continue
+            
+            now = datetime.now()
+            if now.minute % 10 == 0 and now.minute != last_ran_minute:
+                last_ran_minute = now.minute
+                await application.bot.send_message(chat_id=chat_id, text="🔄 [Automatic] Auto check started...")
+                await check_accounts(application, manual=False)
+                await application.bot.send_message(chat_id=chat_id, text="🏁 [Automatic] Auto check complete!")
+        except Exception as e:
+            print(f"Scheduler Error: {e}")
 
 def main():
     Thread(target=run_flask, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add_users))
     app.add_handler(CommandHandler("check", check_cmd))
@@ -108,7 +122,11 @@ def main():
     app.add_handler(CommandHandler("autoon", lambda u, c: (globals().update({'is_auto_enabled': True}), u.message.reply_text("🔄 Auto Check ON"))))
     app.add_handler(CommandHandler("autooff", lambda u, c: (globals().update({'is_auto_enabled': False}), u.message.reply_text("🛑 Auto Check OFF"))))
     app.add_handler(CommandHandler("list", lambda u, c: u.message.reply_text(f"📋: {', '.join([f'@{n}' for n in usernames])}")))
-    app.job_queue.run_repeating(auto_scheduler, interval=60, first=5)
+    
+    # বোতাম বা পোলিং স্টার্ট হওয়ার সাথে সাথে ব্যাকগ্রাউন্ড টাস্ক লুপ চালু করা
+    loop = asyncio.get_event_loop()
+    loop.create_task(start_async_scheduler(app))
+    
     app.run_polling()
 
 if __name__ == "__main__": main()
