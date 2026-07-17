@@ -122,9 +122,13 @@ def get_latest_post(username):
         print(f"Apify Error for {username}: {e}")
         return None
 
-async def process_single_username(username, context, chat_id, manual):
+async def process_single_username(username, context, chat_id):
     try:
         latest = await asyncio.to_thread(get_latest_post, username)
+        
+        # টেলিগ্রাম যাতে জ্যাম না লাগে সেজন্য প্রতি মেসেজের মাঝে সামান্য বিরতি
+        await asyncio.sleep(0.5) 
+        
         if not latest:
             await context.bot.send_message(chat_id=chat_id, text=f"⚠️ @{username}: কোনো ডেটা পাওয়া যায়নি।")
             return
@@ -136,14 +140,12 @@ async def process_single_username(username, context, chat_id, manual):
         last_posts = load_last_posts()
         old_url = last_posts.get(username)
 
-        # প্রথমবার কানেক্ট হলে
         if not old_url:
             last_posts[username] = post_url
             save_last_posts()
             await context.bot.send_message(chat_id=chat_id, text=f"✅ @{username} connected!\n📱 {post_type}\n🔗 {post_url}")
             return
 
-        # যদি নতুন পোস্টের লিংক আলাদা হয়
         if old_url != post_url:
             last_posts[username] = post_url
             save_last_posts()
@@ -165,15 +167,30 @@ async def check_accounts(context: ContextTypes.DEFAULT_TYPE, manual=False):
     if not chat_id or not usernames: return
 
     round_type = "Manual Check" if manual else "Auto Check"
-    await context.bot.send_message(chat_id=chat_id, text=f"🔄 [{round_type}] {len(usernames)} টি অ্যাকাউন্ট একসাথে স্ক্যান করা শুরু হচ্ছে...")
+    
+    # স্ক্যান শুরুর কনফার্মেশন মেসেজটি নিশ্চিতভাবে পাঠানো
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text=f"🔄 [{round_type}] {len(usernames)} টি অ্যাকাউন্ট একসাথে স্ক্যান করা শুরু হচ্ছে..."
+        )
+    except Exception as e:
+        print(f"Start message error: {e}")
 
-    semaphore = asyncio.Semaphore(20) 
+    # জ্যাম এড়াতে সেমাফোর সাইজ কমিয়ে ৫ করা হলো যাতে টেলিগ্রাম মেসেজ ড্রপ না করে
+    semaphore = asyncio.Semaphore(5) 
     async def worker(username):
         async with semaphore:
-            await process_single_username(username, context, chat_id, manual)
+            await process_single_username(username, context, chat_id)
 
     await asyncio.gather(*[worker(u) for u in sorted(list(usernames))])
-    await context.bot.send_message(chat_id=chat_id, text="🏁 রাউন্ড সম্পূর্ণ শেষ হয়েছে!")
+    
+    # স্ক্যান শেষের কনফার্মেশন মেসেজ
+    try:
+        await asyncio.sleep(1)
+        await context.bot.send_message(chat_id=chat_id, text=f"🏁 [{round_type}] রাউন্ড সম্পূর্ণ শেষ হয়েছে!")
+    except Exception as e:
+        print(f"End message error: {e}")
 
 # ==============================
 # CLOCK SCHEDULER
@@ -205,21 +222,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def toggle_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_running; is_running = True
-    await update.message.reply_text("✅ Bot monitoring is now ON.")
+    await update.message.reply_text("✅ Bot monitoring is now activated! [ON]")
 
 async def toggle_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_running; is_running = False
-    await update.message.reply_text("🛑 Bot monitoring is now OFF.")
+    await update.message.reply_text("🛑 Bot monitoring is now deactivated! [OFF]")
 
 async def toggle_auto_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_auto_enabled; is_auto_enabled = True
-    await update.message.reply_text("🔄 Auto Check is now Enabled. (10 Min Interval)")
+    await update.message.reply_text("🔄 Auto Check is now Enabled! Bot will scan every 10 minutes.")
 
 async def toggle_auto_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_auto_enabled; is_auto_enabled = False
-    await update.message.reply_text("🛑 Auto Check is now Disabled.")
+    await update.message.reply_text("🛑 Auto Check is now Disabled! Automatic scanning stopped.")
 
-# মাল্টিপল ইউজারনেম একসাথে অ্যাড করার পারফেক্ট ফাংশন
 async def add_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat_id(update.effective_chat.id)
     if not context.args: 
@@ -246,11 +262,11 @@ async def add_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     if added_users:
         save_usernames()
-        await update.message.reply_text(f"✅ Added successfully:\n" + "\n".join(added_users))
+        await update.message.reply_text(f"✅ Processing & Adding Accounts:\n" + "\n".join(added_users))
         
         for u in added_users:
             pure_name = u.replace("@", "")
-            asyncio.create_task(process_single_username(pure_name, context, update.effective_chat.id, manual=False))
+            asyncio.create_task(process_single_username(pure_name, context, update.effective_chat.id))
     
     if already_monitored:
         await update.message.reply_text(f"⚠️ Already in list:\n" + "\n".join(already_monitored))
@@ -268,22 +284,22 @@ async def remove_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if username in last_posts: 
             del last_posts[username]
             save_last_posts()
-        await update.message.reply_text(f"🗑 @{username} removed!")
+        await update.message.reply_text(f"🗑 @{username} successfully removed from monitor list!")
     else:
-        await update.message.reply_text(f"❌ @{username} not found.")
+        await update.message.reply_text(f"❌ @{username} not found in the list.")
 
 async def list_usernames(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global usernames
     usernames = load_usernames()
-    if not usernames: return await update.message.reply_text("📭 No accounts added.")
-    text = "📋 Monitoring Accounts:\n\n" + "\n".join([f"• @{u}" for u in sorted(usernames)])
+    if not usernames: return await update.message.reply_text("📭 No accounts added yet.")
+    text = "📋 Current Monitoring Accounts:\n\n" + "\n".join([f"• @{u}" for u in sorted(usernames)])
     await update.message.reply_text(text)
 
 async def manual_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_manual_check_time
     save_chat_id(update.effective_chat.id)
     if not is_running: 
-        await update.message.reply_text("🛑 Bot is OFF!")
+        await update.message.reply_text("🛑 Action Denied! Bot monitoring is currently OFF. Please turn it /on first.")
         return
     last_manual_check_time = time.time()
     await check_accounts(context, manual=True)
