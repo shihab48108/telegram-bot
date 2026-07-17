@@ -13,24 +13,35 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes
 )
+from pymongo import MongoClient
 
 # ==============================
-# TOKENS FROM ENVIRONMENT VARIABLES
+# CONFIG FROM ENVIRONMENT VARIABLES
 # ==============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
 
 # ==============================
-# GLOBALS & FILES
+# MONGO DATABASE SETUP
 # ==============================
-is_running = True       
+if MONGO_URI:
+    db_client = MongoClient(MONGO_URI)
+    db = db_client["instagram_monitor_db"]
+    config_col = db["config"]
+    usernames_col = db["usernames"]
+    posts_col = db["last_posts"]
+    use_mongo = True
+    print("✅ MongoDB Connected Successfully!")
+else:
+    use_mongo = False
+    print("⚠️ MONGO_URI missing. Data will reset on Render restarts!")
+
+# GLOBALS
+is_running = True        
 is_auto_enabled = True  
 last_manual_check_time = 0 
 last_ran_minute = -1  
-
-USERNAMES_FILE = "usernames.json"
-LAST_POSTS_FILE = "last_posts.json"
-CHAT_ID_FILE = "chat_id.txt"
 
 apify_client = ApifyClient(APIFY_TOKEN)
 
@@ -39,54 +50,58 @@ flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def home():
-    return "Bot is alive and running 24/7!"
+    return "Bot is alive and running 24/7 on Render!"
 
 def run_flask():
     port = int(os.getenv("PORT", 8080))
     flask_app.run(host='0.0.0.0', port=port)
 
 # ==============================
-# LOAD / SAVE DATA
+# LOAD / SAVE DATA (MongoDB Cloud)
 # ==============================
 def load_usernames():
-    if os.path.exists(USERNAMES_FILE):
-        try:
-            with open(USERNAMES_FILE, "r", encoding="utf-8") as file:
-                return set(json.load(file))
-        except Exception:
-            return set()
+    if use_mongo:
+        data = usernames_col.find_one({"_id": "monitored_list"})
+        return set(data["list"]) if data else set()
     return set()
 
 def save_usernames():
-    with open(USERNAMES_FILE, "w", encoding="utf-8") as file:
-        json.dump(list(usernames), file, indent=2)
+    if use_mongo:
+        usernames_col.update_one(
+            {"_id": "monitored_list"},
+            {"$set": {"list": list(usernames)}},
+            upsert=True
+        )
 
 def load_last_posts():
-    if os.path.exists(LAST_POSTS_FILE):
-        try:
-            with open(LAST_POSTS_FILE, "r", encoding="utf-8") as file:
-                return json.load(file)
-        except Exception:
-            return {}
+    if use_mongo:
+        data = posts_col.find_one({"_id": "posts_tracker"})
+        return data["tracker"] if data else {}
     return {}
 
 def save_last_posts():
-    with open(LAST_POSTS_FILE, "w", encoding="utf-8") as file:
-        json.dump(last_posts, file, indent=2)
+    if use_mongo:
+        posts_col.update_one(
+            {"_id": "posts_tracker"},
+            {"$set": {"tracker": last_posts}},
+            upsert=True
+        )
 
 def save_chat_id(chat_id):
-    with open(CHAT_ID_FILE, "w", encoding="utf-8") as file:
-        file.write(str(chat_id))
+    if use_mongo:
+        config_col.update_one(
+            {"_id": "bot_config"},
+            {"$set": {"chat_id": chat_id}},
+            upsert=True
+        )
 
 def load_chat_id():
-    if os.path.exists(CHAT_ID_FILE):
-        try:
-            with open(CHAT_ID_FILE, "r", encoding="utf-8") as file:
-                return int(file.read().strip())
-        except Exception:
-            return None
+    if use_mongo:
+        data = config_col.find_one({"_id": "bot_config"})
+        return data["chat_id"] if data else None
     return None
 
+# ডাটাবেস থেকে ফ্রেশ ডেটা লোড
 usernames = load_usernames()
 last_posts = load_last_posts()
 
@@ -94,35 +109,48 @@ last_posts = load_last_posts()
 # INSTAGRAM CHECK
 # ==============================
 def get_latest_post(username):
-    run_input = {"username": [username], "resultsLimit": 1}
-    run = apify_client.actor("apify/instagram-post-scraper").call(run_input=run_input)
-    dataset_id = getattr(run, "default_dataset_id", None)
-    if not dataset_id: return None
-    items = list(apify_client.dataset(dataset_id).iterate_items())
-    if not items: return None
-    post = items[0]
-    return {"url": post.get("url"), "type": post.get("type", "Post"), "username": post.get("ownerUsername", username)}
+    try:
+        run_input = {"username": [username], "resultsLimit": 1}
+        run = apify_client.actor("apify/instagram-post-scraper").call(run_input=run_input)
+        dataset_id = getattr(run, "default_dataset_id", None)
+        if not dataset_id: return None
+        items = list(apify_client.dataset(dataset_id).iterate_items())
+        if not items: return None
+        post = items[0]
+        return {"url": post.get("url"), "type": post.get("type", "Post"), "username": post.get("ownerUsername", username)}
+    except Exception as e:
+        print(f"Apify Error for {username}: {e}")
+        return None
 
 async def process_single_username(username, context, chat_id, manual):
     try:
         latest = await asyncio.to_thread(get_latest_post, username)
-        if not latest: return
+        if not latest:
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ @{username}: কোনো ডেটা পাওয়া যায়নি।")
+            return
+            
         post_url = latest["url"]
         post_type = latest["type"]
+        
+        global last_posts
+        last_posts = load_last_posts()
         old_url = last_posts.get(username)
 
+        # প্রথমবার কানেক্ট হলে
         if not old_url:
             last_posts[username] = post_url
             save_last_posts()
             await context.bot.send_message(chat_id=chat_id, text=f"✅ @{username} connected!\n📱 {post_type}\n🔗 {post_url}")
             return
 
+        # যদি নতুন পোস্টের লিংক আলাদা হয়
         if old_url != post_url:
             last_posts[username] = post_url
             save_last_posts()
             await context.bot.send_message(chat_id=chat_id, text=f"🚨 NEW POST!\n👤 @{username}\n📱 {post_type}\n🔗 {post_url}")
         else:
-            await context.bot.send_message(chat_id=chat_id, text=f"✅ @{username}: নতুন পোস্ট নেই।")
+            await context.bot.send_message(chat_id=chat_id, text=f"✅ @{username}: নতুন কোনো পোস্ট নেই।")
+            
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"❌ @{username} Error: `{e}`")
 
@@ -131,10 +159,13 @@ async def process_single_username(username, context, chat_id, manual):
 # ==============================
 async def check_accounts(context: ContextTypes.DEFAULT_TYPE, manual=False):
     chat_id = load_chat_id()
+    global usernames
+    usernames = load_usernames()
+    
     if not chat_id or not usernames: return
 
-    round_type = "Manual" if manual else "Automatic"
-    await context.bot.send_message(chat_id=chat_id, text=f"🔄 [{round_type}] {len(usernames)} টি অ্যাকাউন্ট স্ক্যান হচ্ছে...")
+    round_type = "Manual Check" if manual else "Auto Check"
+    await context.bot.send_message(chat_id=chat_id, text=f"🔄 [{round_type}] {len(usernames)} টি অ্যাকাউন্ট একসাথে স্ক্যান করা শুরু হচ্ছে...")
 
     semaphore = asyncio.Semaphore(20) 
     async def worker(username):
@@ -142,7 +173,7 @@ async def check_accounts(context: ContextTypes.DEFAULT_TYPE, manual=False):
             await process_single_username(username, context, chat_id, manual)
 
     await asyncio.gather(*[worker(u) for u in sorted(list(usernames))])
-    await context.bot.send_message(chat_id=chat_id, text="🏁 রাউন্ড সম্পূর্ণ শেষ হয়েছে!")
+    await context.bot.send_message(chat_id=chat_id, text="🏁 রাউন্ড সম্পূর্ণ শেষ হয়েছে!")
 
 # ==============================
 # CLOCK SCHEDULER
@@ -157,13 +188,6 @@ async def clock_scheduler(context: ContextTypes.DEFAULT_TYPE):
                 await check_accounts(context, manual=False)
                 last_ran_minute = now.minute
             else:
-                print("Skipping Auto Check: Manual check happened < 5 mins ago.")
-                chat_id = load_chat_id()
-                if chat_id:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text="⏭️ সাম্প্রতিক ম্যানুয়াল চেকের কারণে এই রাউন্ডের অটো চেকটি স্কিপ করা হলো।"
-                    )
                 last_ran_minute = now.minute
 
 # ==============================
@@ -176,7 +200,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Instagram Monitor Bot is running on Render!\n\n"
         "Main Commands:\n/on | /off\n/check\n\n"
         "Auto Check Commands:\n/autoon | /autooff\n\n"
-        "List Commands:\n/add username\n/remove username\n/list"
+        "List Commands:\n/add username1 username2\n/remove username\n/list"
     )
 
 async def toggle_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -195,27 +219,62 @@ async def toggle_auto_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_auto_enabled; is_auto_enabled = False
     await update.message.reply_text("🛑 Auto Check is now Disabled.")
 
+# মাল্টিপল ইউজারনেম একসাথে অ্যাড করার পারফেক্ট ফাংশন
 async def add_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat_id(update.effective_chat.id)
-    if not context.args: return await update.message.reply_text("❌ Example: /add cristiano")
-    username = context.args[0].replace("@", "").strip().lower()
-    if username in usernames: return await update.message.reply_text(f"⚠️ @{username} is already monitored.")
-    usernames.add(username)
-    save_usernames()
-    await update.message.reply_text(f"✅ @{username} added!")
+    if not context.args: 
+        return await update.message.reply_text("❌ Example: /add cristiano leomessi neymarjr")
+    
+    global usernames
+    usernames = load_usernames()
+    
+    added_users = []
+    already_monitored = []
+    
+    for arg in context.args:
+        cleaned_args = arg.replace("@", "").replace(",", " ").split()
+        for u_name in cleaned_args:
+            username = u_name.strip().lower()
+            if not username:
+                continue
+                
+            if username in usernames:
+                already_monitored.append(f"@{username}")
+            else:
+                usernames.add(username)
+                added_users.append(f"@{username}")
+            
+    if added_users:
+        save_usernames()
+        await update.message.reply_text(f"✅ Added successfully:\n" + "\n".join(added_users))
+        
+        for u in added_users:
+            pure_name = u.replace("@", "")
+            asyncio.create_task(process_single_username(pure_name, context, update.effective_chat.id, manual=False))
+    
+    if already_monitored:
+        await update.message.reply_text(f"⚠️ Already in list:\n" + "\n".join(already_monitored))
 
 async def remove_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global usernames, last_posts
+    usernames = load_usernames()
+    last_posts = load_last_posts()
+    
     if not context.args: return await update.message.reply_text("❌ Example: /remove cristiano")
     username = context.args[0].replace("@", "").strip().lower()
     if username in usernames:
         usernames.remove(username)
         save_usernames()
-        if username in last_posts: del last_posts[username]; save_last_posts()
+        if username in last_posts: 
+            del last_posts[username]
+            save_last_posts()
         await update.message.reply_text(f"🗑 @{username} removed!")
     else:
         await update.message.reply_text(f"❌ @{username} not found.")
 
 async def list_usernames(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global usernames
+    usernames = load_usernames()
     if not usernames: return await update.message.reply_text("📭 No accounts added.")
     text = "📋 Monitoring Accounts:\n\n" + "\n".join([f"• @{u}" for u in sorted(usernames)])
     await update.message.reply_text(text)
@@ -229,11 +288,7 @@ async def manual_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_manual_check_time = time.time()
     await check_accounts(context, manual=True)
 
-# ==============================
-# MAIN
-# ==============================
 def main():
-    # Render-এর জন্য ব্যাকগ্রাউন্ডে Flask ওয়েব সার্ভার স্টার্ট
     Thread(target=run_flask, daemon=True).start()
     
     app = Application.builder().token(BOT_TOKEN).build()
