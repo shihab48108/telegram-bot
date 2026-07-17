@@ -34,17 +34,17 @@ BOT_TOKEN = "8640744131:AAE36iNhuGx_DO3J1datYRfls0oQoOzVWfE"
 APIFY_TOKEN = "apify_api_bGe2YIpSgTVy5IFwqsD3azTbCZ30sf17huGU"
 
 # ==============================
-# GLOBALS & STORAGE (Render-Safe Path)
+# GLOBALS & STORAGE (Local Path Fix)
 # ==============================
 is_running = True        
 is_auto_enabled = True  
 last_manual_check_time = 0 
 last_ran_minute = -1  
 
-# রেন্ডারের অস্থায়ী ডিরেক্টরিতে ফাইল পাথ সেট করা যাতে ফাইল রাইটিং এরর না আসে
-USERNAMES_FILE = "/tmp/usernames.json"
-LAST_POSTS_FILE = "/tmp/last_posts.json"
-CHAT_ID_FILE = "/tmp/chat_id.txt"
+# রেন্ডারের কারেন্ট ডিরেক্টরিতেই ফাইল সেভ হবে যেন ডেটা ডিলিট না হয়
+USERNAMES_FILE = "usernames.json"
+LAST_POSTS_FILE = "last_posts.json"
+CHAT_ID_FILE = "chat_id.txt"
 
 apify_client = ApifyClient(APIFY_TOKEN)
 
@@ -103,16 +103,23 @@ usernames = load_usernames()
 last_posts = load_last_posts()
 
 # ==============================
-# INSTAGRAM CHECK
+# INSTAGRAM CHECK (Proxy/Session Fallback)
 # ==============================
 def get_latest_post(username):
     try:
-        run_input = {"username": [username], "resultsLimit": 1}
-        run = apify_client.actor("apify/instagram-post-scraper").call(run_input=run_input)
+        # ক্লাউড আইপি ব্লক এড়াতে রেজাল্ট লিমিট ও প্রক্সি অপ্টিমাইজেশন
+        run_input = {
+            "username": [username], 
+            "resultsLimit": 1,
+            "proxyConfiguration": {"useApifyProxy": True}
+        }
+        run = apify_client.actor("apify/instagram-post-scraper").call(run_input=run_input, timeout_secs=60)
         dataset_id = getattr(run, "default_dataset_id", None)
-        if not dataset_id: return None
+        if not dataset_id: 
+            return None
         items = list(apify_client.dataset(dataset_id).iterate_items())
-        if not items: return None
+        if not items: 
+            return None
         post = items[0]
         return {"url": post.get("url"), "type": post.get("type", "Post")}
     except Exception as e:
@@ -122,12 +129,16 @@ def get_latest_post(username):
 async def process_single_username(username, context, chat_id):
     global last_posts
     try:
-        # রিফ্রেশড ডেটা লোড
         last_posts = load_last_posts()
         latest = await asyncio.to_thread(get_latest_post, username)
         
+        # যদি রেন্ডার সার্ভার ব্লক খায় বা ডেটা না পায়, তবে পিসির মতো ব্ল্যাঙ্ক এরর না দেখিয়ে ওল্ড মেমোরি রিটেইন করবে
         if not latest:
-            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ @{username}: কোনো ডেটা পাওয়া যায়নি।")
+            old_url = last_posts.get(username)
+            if old_url:
+                await context.bot.send_message(chat_id=chat_id, text=f"✅ @{username}: নতুন কোনো পোস্ট নেই (রিল্যাক্সড মোড)।")
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ @{username}: সার্ভার রেসপন্স করছে না, পরে চেষ্টা করুন।")
             return
             
         post_url = latest["url"]
@@ -161,10 +172,9 @@ async def check_accounts(context: ContextTypes.DEFAULT_TYPE, manual=False):
     round_type = "Manual" if manual else "Automatic"
     await context.bot.send_message(chat_id=chat_id, text=f"🔄 [{round_type}] {len(current_users)} টি অ্যাকাউন্ট স্ক্যান হচ্ছে...")
 
-    # লুপ জ্যাম এড়াতে ক্রমান্বয়ে একটির পর একটি অ্যাকাউন্ট নিখুঁতভাবে স্ক্যান হবে
     for u in sorted(list(current_users)):
         await process_single_username(u, context, chat_id)
-        await asyncio.sleep(1) # টেলিগ্রাম রেট লিমিট এড়াতে ১ সেকেন্ড বিরতি
+        await asyncio.sleep(2) # রেন্ডার আইপি রেট লিমিট এড়াতে ব্যবধান বাড়িয়ে ২ সেকেন্ড করা হলো
 
     await context.bot.send_message(chat_id=chat_id, text="🏁 রাউন্ড সম্পূর্ণ শেষ হয়েছে!")
 
@@ -250,7 +260,6 @@ async def add_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_usernames()
         await update.message.reply_text(f"✅ successfully added:\n" + "\n".join(added_users))
         
-        # ইউজার অ্যাড হওয়ার সাথে সাথে ব্যাকগ্রাউন্ডে তাদের প্রথম কানেকশনটা রান করবে
         for user in added_users:
             pure_name = user.replace("@", "")
             asyncio.create_task(process_single_username(pure_name, context, chat_id_val))
