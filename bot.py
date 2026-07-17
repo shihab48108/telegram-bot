@@ -34,14 +34,13 @@ BOT_TOKEN = "8640744131:AAE36iNhuGx_DO3J1datYRfls0oQoOzVWfE"
 APIFY_TOKEN = "apify_api_bGe2YIpSgTVy5IFwqsD3azTbCZ30sf17huGU"
 
 # ==============================
-# GLOBALS & STORAGE (Local Path Fix)
+# GLOBALS & STORAGE
 # ==============================
 is_running = True        
 is_auto_enabled = True  
 last_manual_check_time = 0 
 last_ran_minute = -1  
 
-# রেন্ডারের কারেন্ট ডিরেক্টরিতেই ফাইল সেভ হবে যেন ডেটা ডিলিট না হয়
 USERNAMES_FILE = "usernames.json"
 LAST_POSTS_FILE = "last_posts.json"
 CHAT_ID_FILE = "chat_id.txt"
@@ -103,17 +102,16 @@ usernames = load_usernames()
 last_posts = load_last_posts()
 
 # ==============================
-# INSTAGRAM CHECK (Proxy/Session Fallback)
+# INSTAGRAM CHECK
 # ==============================
 def get_latest_post(username):
     try:
-        # ক্লাউড আইপি ব্লক এড়াতে রেজাল্ট লিমিট ও প্রক্সি অপ্টিমাইজেশন
         run_input = {
             "username": [username], 
             "resultsLimit": 1,
-            "proxyConfiguration": {"useApifyProxy": True}
+            "proxyConfiguration": {"useApifyProxy": True, "groups": ["RESIDENTIAL"]}
         }
-        run = apify_client.actor("apify/instagram-post-scraper").call(run_input=run_input, timeout_secs=60)
+        run = apify_client.actor("apify/instagram-post-scraper").call(run_input=run_input, timeout_secs=120)
         dataset_id = getattr(run, "default_dataset_id", None)
         if not dataset_id: 
             return None
@@ -132,13 +130,12 @@ async def process_single_username(username, context, chat_id):
         last_posts = load_last_posts()
         latest = await asyncio.to_thread(get_latest_post, username)
         
-        # যদি রেন্ডার সার্ভার ব্লক খায় বা ডেটা না পায়, তবে পিসির মতো ব্ল্যাঙ্ক এরর না দেখিয়ে ওল্ড মেমোরি রিটেইন করবে
         if not latest:
             old_url = last_posts.get(username)
             if old_url:
-                await context.bot.send_message(chat_id=chat_id, text=f"✅ @{username}: নতুন কোনো পোস্ট নেই (রিল্যাক্সড মোড)।")
+                await context.bot.send_message(chat_id=chat_id, text=f"✅ @{username}: নতুন পোস্ট নেই।")
             else:
-                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ @{username}: সার্ভার রেসপন্স করছে না, পরে চেষ্টা করুন।")
+                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ @{username}: ইনস্টাগ্রাম সার্ভার ব্যস্ত, আবার চেষ্টা করুন।")
             return
             
         post_url = latest["url"]
@@ -174,7 +171,7 @@ async def check_accounts(context: ContextTypes.DEFAULT_TYPE, manual=False):
 
     for u in sorted(list(current_users)):
         await process_single_username(u, context, chat_id)
-        await asyncio.sleep(2) # রেন্ডার আইপি রেট লিমিট এড়াতে ব্যবধান বাড়িয়ে ২ সেকেন্ড করা হলো
+        await asyncio.sleep(2) 
 
     await context.bot.send_message(chat_id=chat_id, text="🏁 রাউন্ড সম্পূর্ণ শেষ হয়েছে!")
 
@@ -260,9 +257,11 @@ async def add_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_usernames()
         await update.message.reply_text(f"✅ successfully added:\n" + "\n".join(added_users))
         
+        # 🛠️ ফিক্স: এখানে ডুপ্লিকেট টাস্ক তৈরির মেকানিজম রিমুভ করে দিয়ে ডিরেক্ট সিঙ্গেল রাউন্ড কল সেট করা হলো
+        await update.message.reply_text("🔄 নতুন যুক্ত করা অ্যাকাউন্টগুলোর প্রথম কানেকশন রান করা হচ্ছে...")
         for user in added_users:
             pure_name = user.replace("@", "")
-            asyncio.create_task(process_single_username(pure_name, context, chat_id_val))
+            await process_single_username(pure_name, context, chat_id_val)
     
     if already_monitored:
         await update.message.reply_text(f"⚠️ Already in list:\n" + "\n".join(already_monitored))
