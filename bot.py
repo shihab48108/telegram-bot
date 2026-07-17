@@ -4,6 +4,7 @@ import asyncio
 import time
 from datetime import datetime
 from threading import Thread
+from flask import Flask
 
 from apify_client import ApifyClient
 from telegram import Update
@@ -12,37 +13,31 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes
 )
-from flask import Flask
 
 # ==============================
-# FLASK WEB SERVER (For Render Keep-Alive)
+# RENDER SERVER SETUP (খুবই জরুরি)
 # ==============================
-# Render-এ ফ্রি টায়ার সচল রাখতে এবং পোর্ট বাইন্ডিং এরর এড়াতে এই সার্ভারটি দরকার।
-flask_app = Flask('')
+app_flask = Flask(__name__)
 
-@flask_app.route('/')
+@app_flask.route('/')
 def home():
-    return "Bot is alive and running!"
+    return "Bot is live and running 24/7 on Render!"
 
 def run_flask():
-    # Render নিজে থেকেই PORT এনভায়রনমেন্ট ভ্যারিয়েবল প্রোভাইড করে
+    # রেন্ডার তার নিজের মতো PORT সেট করে নেয়, না পেলে ডিফল্ট ৮০৮০ ব্যবহার করবে
     port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host='0.0.0.0', port=port)
+    app_flask.run(host='0.0.0.0', port=port)
 
 # ==============================
-# ENVIRONMENT VARIABLES
+# YOUR TOKENS
 # ==============================
-# সিকিউরিটির জন্য টোকেনগুলো Render Environment-এ সেট করবেন
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-APIFY_TOKEN = os.environ.get("APIFY_TOKEN")
-
-if not BOT_TOKEN or not APIFY_TOKEN:
-    raise ValueError("Error: BOT_TOKEN or APIFY_TOKEN is missing in Environment Variables!")
+BOT_TOKEN = "8640744131:AAE36iNhuGx_DO3J1datYRfls0oQoOzVWfE"
+APIFY_TOKEN = "apify_api_bGe2YIpSgTVy5IFwqsD3azTbCZ30sf17huGU"
 
 # ==============================
 # GLOBALS & FILES
 # ==============================
-is_running = True       
+is_running = True        
 is_auto_enabled = True  
 last_manual_check_time = 0 
 last_ran_minute = -1  
@@ -111,18 +106,13 @@ def get_latest_post(username):
         if not items: return None
         post = items[0]
         return {"url": post.get("url"), "type": post.get("type", "Post"), "username": post.get("ownerUsername", username)}
-    except Exception as e:
-        print(f"Apify Error for {username}: {e}")
+    except Exception:
         return None
 
 async def process_single_username(username, context, chat_id, manual):
     try:
         latest = await asyncio.to_thread(get_latest_post, username)
-        if not latest: 
-            if manual:
-                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ @{username} এর ডেটা পাওয়া যায়নি বা স্ক্র্যাপার ব্যর্থ হয়েছে।")
-            return
-            
+        if not latest: return
         post_url = latest["url"]
         post_type = latest["type"]
         old_url = last_posts.get(username)
@@ -138,8 +128,7 @@ async def process_single_username(username, context, chat_id, manual):
             save_last_posts()
             await context.bot.send_message(chat_id=chat_id, text=f"🚨 NEW POST!\n👤 @{username}\n📱 {post_type}\n🔗 {post_url}")
         else:
-            if manual:
-                await context.bot.send_message(chat_id=chat_id, text=f"✅ @{username}: নতুন পোস্ট নেই।")
+            await context.bot.send_message(chat_id=chat_id, text=f"✅ @{username}: নতুন পোস্ট নেই।")
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"❌ @{username} Error: `{e}`")
 
@@ -179,7 +168,7 @@ async def clock_scheduler(context: ContextTypes.DEFAULT_TYPE):
                 if chat_id:
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text="⏭️ সাম্প্রতিক ম্যানুয়াল চেকের কারণে এই রাউন্ডের অটো চেকটি স্কিপ করা হলো।"
+                        text="⏭️ সাম্প্রতিক ম্যানুয়াল চেকের কারণে (৫ মিনিটের কম ব্যবধান) এই রাউন্ডের অটো চেকটি স্কিপ করা হলো।"
                     )
                 last_ran_minute = now.minute
 
@@ -190,7 +179,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     save_chat_id(chat_id)
     await update.message.reply_text(
-        "✅ Instagram Monitor Bot is running on Render!\n\n"
+        "✅ Instagram Monitor Bot is running!\n\n"
         "Main Commands:\n/on | /off\n/check\n\n"
         "Auto Check Commands:\n/autoon | /autooff\n\n"
         "List Commands:\n/add username\n/remove username\n/list"
@@ -204,28 +193,49 @@ async def toggle_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def toggle_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_running
     is_running = False
-    await update.message.reply_text("🛑 Bot monitoring is now OFF.")
+    await update.message.reply_text("🛑 Bot monitoring is now OFF. (সব ধরনের চেকিং বন্ধ)")
 
 async def toggle_auto_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_auto_enabled
     is_auto_enabled = True
-    await update.message.reply_text("🔄 Auto Check is now Enabled. প্রতি ১০ মিনিট পর পর অটো চেক হবে।")
+    await update.message.reply_text("🔄 Auto Check is now Enabled. ঘড়ি ধরে প্রতি ১০ মিনিট পর পর অটো চেক হবে।")
 
 async def toggle_auto_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_auto_enabled
     is_auto_enabled = False
-    await update.message.reply_text("🛑 Auto Check is now Disabled.")
+    await update.message.reply_text("🛑 Auto Check is now Disabled. অটোমেটিক চেকিং বন্ধ করা হয়েছে।")
 
 async def add_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat_id(update.effective_chat.id)
-    if not context.args: return await update.message.reply_text("❌ Example: /add cristiano")
+    if not context.args: 
+        return await update.message.reply_text("❌ Example: /add cristiano leomessi neymarjr")
     
-    username = context.args[0].replace("@", "").strip().lower()
-    if username in usernames: return await update.message.reply_text(f"⚠️ @{username} is already monitored.")
+    global usernames
+    usernames = load_usernames()
     
-    usernames.add(username)
-    save_usernames()
-    await update.message.reply_text(f"✅ @{username} added!")
+    added_users = []
+    already_monitored = []
+    
+    # একাধিক ইউজারনেম স্পেস বা কমা দিয়ে আলাদা করার প্রসেস
+    for arg in context.args:
+        cleaned_args = arg.replace("@", "").replace(",", " ").split()
+        for u_name in cleaned_args:
+            username = u_name.strip().lower()
+            if not username:
+                continue
+                
+            if username in usernames:
+                already_monitored.append(f"@{username}")
+            else:
+                usernames.add(username)
+                added_users.append(f"@{username}")
+            
+    if added_users:
+        save_usernames()
+        await update.message.reply_text(f"✅ successfully added:\n" + "\n".join(added_users))
+    
+    if already_monitored:
+        await update.message.reply_text(f"⚠️ Already in list:\n" + "\n".join(already_monitored))
 
 async def remove_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return await update.message.reply_text("❌ Example: /remove cristiano")
@@ -259,7 +269,7 @@ async def manual_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # ==============================
 def main():
-    # ব্যাকগ্রাউন্ড থ্রেডে Flask Web Server চালানো হচ্ছে 
+    # 🚀 বটের মেইন ফাংশন চালু হওয়ার আগেই Flask ওয়েব সার্ভারটিকে ব্যাকগ্রাউন্ড থ্রেডে স্টার্ট করা হলো
     Thread(target=run_flask, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
@@ -276,7 +286,7 @@ def main():
     
     app.job_queue.run_repeating(clock_scheduler, interval=20, first=5)
     
-    print("Instagram Monitor Bot is starting...")
+    print("Instagram Monitor Bot is running...")
     app.run_polling()
 
 if __name__ == "__main__":
